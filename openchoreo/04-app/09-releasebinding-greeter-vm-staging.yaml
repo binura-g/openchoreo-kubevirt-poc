@@ -3,7 +3,7 @@
 #   kubectl -n default get releasebinding greeter-vm-development -o jsonpath='{.spec.releaseName}'
 # replicas: 1 because the vm-data-disk trait creates ONE PVC that every replica attaches; with 2
 # replicas QEMU's image lock refuses the second VM ("Failed to get \"write\" lock"). Per-replica disks
-# need pool dataVolumeTemplates (CDI). See PROPOSAL.md, "Rollouts and persistent data".
+# need pool dataVolumeTemplates (CDI). See PROPOSAL.md, note [3] under the summary table.
 apiVersion: openchoreo.dev/v1alpha1
 kind: ReleaseBinding
 metadata:

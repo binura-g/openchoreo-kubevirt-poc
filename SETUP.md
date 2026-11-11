@@ -7,7 +7,7 @@ Tested end to end with **OpenChoreo v1.3.3** (Helm charts `1.3.3`, installed wit
 
 - **Apple Silicon M3 or newer, macOS 15 or newer.** Apple's Virtualization.framework only supports nested
   virtualization on these. On an M1 or M2 there is no `/dev/kvm`, and KubeVirt cannot boot arm64 guests at all:
-  software emulation fails with `CPU mode 'host-passthrough' ... not supported by hypervisor` (see the test environment notes in PROPOSAL.md).
+  software emulation fails with `CPU mode 'host-passthrough' ... not supported by hypervisor` (see the test environment notes in POC_OBSERVATIONS.md).
 - CLI tools: `colima`, `docker`, `k3d`, `kubectl`, `helm`, `jq`, `yq`, `expect` (`expect` is only needed for guest checks).
 - OpenChoreo v1.3+ installed on a k3d cluster named `openchoreo` in the Colima Docker runtime. Use installation script from https://openchoreo.dev/docs/getting-started/try-it-out/on-k3d-locally/
   Starting from scratch? Do §1 (Colima) **before** installing OpenChoreo, so the cluster is created on a Colima VM
@@ -154,7 +154,7 @@ kubectl -n openchoreo-control-plane get cm openchoreo-api-config -o jsonpath='{.
 </details>
 
 openchoreo-api checks the rules at startup and exits if one is invalid, so keep an eye on the helm rollout. For more detail, see
-the resource-tree notes in PROPOSAL.md.
+the resource-tree notes in POC_OBSERVATIONS.md.
 
 ### 3.3 Build workflow, traits and ComponentType
 
@@ -289,7 +289,7 @@ kubectl -n $SNS wait vmi --all --for condition=Ready --timeout=300s
 ```
 
 Keep `replicas: 1` in staging. The `vm-data-disk` PVC is shared by every replica, so a second VM fails on QEMU's
-disk write lock (PROPOSAL.md, "Rollouts and persistent data").
+disk write lock (PROPOSAL.md, note [3] under the summary table).
 
 ---
 
@@ -360,7 +360,7 @@ curl -s -X POST localhost:19099/api/v1/metrics/query -H 'Content-Type: applicati
 ```
 In the UI, logs, metrics and traces appear under the greeter-vm component in each environment. If your install also
 runs OpenCost (the `latest-dev` one did; v1.3.3 doesn't), it exports duplicate kube-state-metrics series and the
-resource numbers come out doubled (PROPOSAL.md, observability details).
+resource numbers come out doubled (POC_OBSERVATIONS.md, observability details).
 
 
 ### 6.5 Zero-downtime rollout (separate test component)
@@ -394,7 +394,7 @@ awk '{c[$2]++} END {for (k in c) print k, c[k]}' /tmp/zd.log           # expect 
 ```
 
 Expected result: only `200` responses. The pool replaces one VM, waits until the new one passes its readiness
-probe, then replaces the other (PROPOSAL.md, full results #20). With `replicas: 1`, the same test shows about 60 s of `503`.
+probe, then replaces the other (POC_OBSERVATIONS.md, full results #20). With `replicas: 1`, the same test shows about 60 s of `503`.
 Remove the test with `kubectl -n default delete component greeter-vm-ha` and
 `kubectl -n default delete workload greeter-vm-ha-workload`.
 

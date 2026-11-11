@@ -1,6 +1,6 @@
 # vm-service: a long-running, request-serving component that runs as KubeVirt VM(s).
 #
-# Guest contract (see PROPOSAL.md, "Implementation: ComponentType vm-service"):
+# Guest contract (see POC_OBSERVATIONS.md, "Implementation: ComponentType vm-service"):
 #   disk "rootdisk"  <- parameters.baseImage         (OS containerDisk, e.g. Ubuntu cloud image)
 #   disk "appdisk"   <- workload.container.image     (app containerDisk built by vm-appdisk-builder;
 #                                                     ext4 fs, mounted read-only at /opt/app, serial "ocapp")
