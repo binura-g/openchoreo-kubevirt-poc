@@ -1,0 +1,26 @@
+# 2 replicas; the pool replaces one VM at a time (vm-service: updateStrategy.proactive, maxUnavailable: 1).
+# Change ROLLOUT_MARKER and re-apply to trigger a rollout (every env value is in the VM config hash).
+apiVersion: openchoreo.dev/v1alpha1
+kind: ReleaseBinding
+metadata:
+  name: greeter-vm-ha-development
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+    componentName: greeter-vm-ha
+  environment: development
+  componentTypeEnvironmentConfigs:
+    replicas: 2
+    cpuCores: 1
+    memory: 1Gi
+  traitEnvironmentConfigs:
+    ready:
+      initialDelaySeconds: 20
+      periodSeconds: 2
+      failureThreshold: 3
+  workloadOverrides:
+    container:
+      env:
+        - key: ROLLOUT_MARKER
+          value: "1"

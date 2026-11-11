@@ -1,0 +1,16 @@
+# Project for the KubeVirt PoC, using the default deployment pipeline (development -> staging -> production).
+apiVersion: openchoreo.dev/v1alpha1
+kind: Project
+metadata:
+  name: vm-poc
+  namespace: default
+  annotations:
+    openchoreo.dev/display-name: VM PoC
+    openchoreo.dev/description: KubeVirt-backed components
+spec:
+  deploymentPipelineRef:
+    kind: DeploymentPipeline
+    name: default
+  type:
+    kind: ClusterProjectType
+    name: default

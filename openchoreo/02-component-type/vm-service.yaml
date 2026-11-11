@@ -1,0 +1,343 @@
+# vm-service: a long-running, request-serving component that runs as KubeVirt VM(s).
+#
+# Guest contract (see PROPOSAL.md, "Implementation: ComponentType vm-service"):
+#   disk "rootdisk"  <- parameters.baseImage         (OS containerDisk, e.g. Ubuntu cloud image)
+#   disk "appdisk"   <- workload.container.image     (app containerDisk built by vm-appdisk-builder;
+#                                                     ext4 fs, mounted read-only at /opt/app, serial "ocapp")
+#   disk "secrets"   <- ESO-managed Secret            (ISO, serial "ocsecrets", only when secrets exist)
+#   cloud-init       <- Secret <name>-cloudinit       (env file, config files, bootstrap + systemd units)
+#   data disks       <- vm-data-disk trait            (serial "ocd-<instance>", auto-formatted, /mnt/<instance>)
+#
+# workloadType is "proxy" because OpenChoreo only knows the built-in workload kinds;
+# "proxy" is the only type that admits a non-apps/batch primary resource.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterComponentType
+metadata:
+  name: vm-service
+  annotations:
+    openchoreo.dev/display-name: VM Service
+    openchoreo.dev/description: A long-running component that runs inside KubeVirt virtual machines
+spec:
+  workloadType: proxy
+  allowedWorkflows:
+    - kind: ClusterWorkflow
+      name: vm-appdisk-builder
+  allowedTraits:
+    - kind: ClusterTrait
+      name: vm-readiness-probe
+    - kind: ClusterTrait
+      name: vm-data-disk
+  parameters:
+    openAPIV3Schema:
+      type: object
+      properties:
+        baseImage:
+          type: string
+          default: quay.io/containerdisks/ubuntu:24.04
+          description: OS containerDisk image the VM boots from (must match the node architecture).
+        startCommand:
+          type: string
+          default: ""
+          description: >-
+            Command systemd runs as the app (e.g. /opt/app/go-greeter). Falls back to
+            workload.container.command + args. Leave both empty when the base image ships its own unit.
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        replicas:
+          type: integer
+          default: 1
+          minimum: 0
+        cpuCores:
+          type: integer
+          default: 1
+          minimum: 1
+        memory:
+          type: string
+          default: 1Gi
+          description: Guest memory (virt-launcher pod requests this plus KubeVirt overhead).
+        debugPassword:
+          type: string
+          default: ""
+          description: PoC only. When set, enables console login for the image's default user.
+  validations:
+    - message: Endpoints with 'external' visibility require gateway.ingress.external to be configured on the Environment or DataPlane.
+      rule: |-
+        ${workload.endpoints.exists(name, ep, "external" in ep.visibility)
+          ? has(gateway.ingress) && has(gateway.ingress.external)
+          : true}
+    - message: Endpoints with 'internal' visibility require gateway.ingress.internal to be configured on the Environment or DataPlane.
+      rule: |-
+        ${workload.endpoints.exists(name, ep, "internal" in ep.visibility)
+          ? has(gateway.ingress) && has(gateway.ingress.internal)
+          : true}
+  resources:
+    # ---------------------------------------------------------------- primary workload
+    - id: virtualmachinepool
+      targetPlane: dataplane
+      template:
+        apiVersion: pool.kubevirt.io/v1beta1
+        kind: VirtualMachinePool
+        metadata:
+          name: ${metadata.name}
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        spec:
+          replicas: ${environmentConfigs.replicas}
+          selector:
+            matchLabels: ${metadata.podSelectors}
+          # Replace VMs whenever the VM template changes (new app disk, config hash, sizing).
+          updateStrategy:
+            proactive: {}
+          maxUnavailable: 1
+          virtualMachineTemplate:
+            metadata:
+              labels: ${metadata.podSelectors}
+            spec:
+              runStrategy: Always
+              template:
+                metadata:
+                  # Propagated to the virt-launcher pod, so the Service below selects it.
+                  labels: ${metadata.podSelectors}
+                  annotations:
+                    # Changes to config/secret refs/dependencies/command must replace the VM:
+                    # cloud-init and ISO disks are only read at boot.
+                    # "guest-contract/N": bump N whenever the cloud-init template below changes,
+                    # otherwise running VMs keep the old bootstrap/unit files (template text is not hashed).
+                    openchoreo.dev/vm-config-hash: |
+                      ${oc_hash(
+                        configurations.configs.envs.map(e, e.name + "=" + e.value).join("\n") + "|" +
+                        configurations.configs.files.map(f, f.mountPath + "/" + f.name + "=" + f.value).join("\n") + "|" +
+                        configurations.secrets.envs.map(s, s.name + "=" + s.remoteRef.key + "#" + s.remoteRef.?property.orValue("")).join("\n") + "|" +
+                        configurations.secrets.files.map(f, f.mountPath + "/" + f.name + "=" + f.remoteRef.key + "#" + f.remoteRef.?property.orValue("")).join("\n") + "|" +
+                        dependencies.envVars.filter(e, has(e.value)).map(e, e.name + "=" + e.value).join("\n") + "|" +
+                        parameters.startCommand + "|" + environmentConfigs.debugPassword + "|" +
+                        (has(workload.container.command) ? workload.container.command.join(" ") : "") + "|" +
+                        (has(workload.container.args) ? workload.container.args.join(" ") : "") + "|" +
+                        "guest-contract/2"
+                      )}
+                spec:
+                  domain:
+                    cpu:
+                      cores: ${environmentConfigs.cpuCores}
+                    memory:
+                      guest: ${environmentConfigs.memory}
+                    devices:
+                      disks: |
+                        ${[
+                          {"name": "rootdisk", "disk": {"bus": "virtio"}},
+                          {"name": "appdisk", "serial": "ocapp", "disk": {"bus": "virtio"}},
+                          {"name": "cloudinitdisk", "disk": {"bus": "virtio"}}
+                        ] + (size(configurations.secrets.envs) + size(configurations.secrets.files) > 0
+                          ? [{"name": "secrets", "serial": "ocsecrets", "disk": {"bus": "virtio"}}]
+                          : [])}
+                      interfaces:
+                        - name: default
+                          masquerade: {}
+                          ports: |
+                            ${size(workload.endpoints) > 0
+                              ? workload.endpoints.transformList(name, ep, {"port": ep.port})
+                              : oc_omit()}
+                  networks:
+                    - name: default
+                      pod: {}
+                  volumes: |
+                    ${[
+                      {"name": "rootdisk", "containerDisk": {"image": parameters.baseImage}},
+                      {"name": "appdisk", "containerDisk": {"image": workload.container.image}},
+                      {"name": "cloudinitdisk", "cloudInitNoCloud": {"secretRef": {"name": metadata.name + "-cloudinit"}}}
+                    ] + (size(configurations.secrets.envs) + size(configurations.secrets.files) > 0
+                      ? [{"name": "secrets", "secret": {"secretName": metadata.name + "-secrets"}}]
+                      : [])}
+
+    # ---------------------------------------------------------------- guest bootstrap (cloud-init)
+    # Workload env/config/dependency values are rendered here because VMs have no env injection.
+    - id: cloudinit
+      targetPlane: dataplane
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ${metadata.name}-cloudinit
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        type: Opaque
+        data:
+          userdata: |
+            ${base64.encode(bytes(
+              "#cloud-config\n" +
+              (environmentConfigs.debugPassword != ""
+                ? "password: \"" + environmentConfigs.debugPassword + "\"\nchpasswd:\n  expire: false\nssh_pwauth: true\n"
+                : "") +
+              "write_files:\n" +
+              "- path: /etc/openchoreo/app.env\n  permissions: '0644'\n  encoding: b64\n  content: " +
+              base64.encode(bytes(
+                (configurations.configs.envs.map(e, e.name + "=\"" + e.value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"") +
+                 dependencies.envVars.filter(e, has(e.value)).map(e, e.name + "=\"" + e.value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+                ).join("\n") + "\n")) + "\n" +
+              configurations.configs.files.map(f,
+                "- path: \"" + f.mountPath + "/" + f.name + "\"\n  permissions: '0644'\n  encoding: b64\n  content: " +
+                base64.encode(bytes(f.value)) + "\n").join("") +
+              "- path: /usr/local/sbin/openchoreo-bootstrap\n  permissions: '0755'\n  encoding: b64\n  content: " +
+              base64.encode(bytes(
+                "#!/bin/sh\n" +
+                "# Runs on every boot: mounts the app/secret/data disks and renders secret env.\n" +
+                "set -u\n" +
+                "mkdir -p /etc/openchoreo /opt/app /run/openchoreo/secrets\n" +
+                "mountpoint -q /opt/app || mount -o ro /dev/disk/by-id/virtio-ocapp /opt/app\n" +
+                "if [ -e /dev/disk/by-id/virtio-ocsecrets ]; then\n" +
+                "  mountpoint -q /run/openchoreo/secrets || mount -o ro /dev/disk/by-id/virtio-ocsecrets /run/openchoreo/secrets\n" +
+                "fi\n" +
+                "umask 077\n" +
+                ": > /etc/openchoreo/secret.env\n" +
+                configurations.secrets.envs.map(s,
+                  "printf '%s=\"%s\"\\n' '" + s.name + "' \"$(cat /run/openchoreo/secrets/" + s.name + ")\" >> /etc/openchoreo/secret.env\n").join("") +
+                configurations.secrets.files.map(f,
+                  "install -D -m 0600 /run/openchoreo/secrets/" + f.name + " '" + f.mountPath + "/" + f.name + "'\n").join("") +
+                "for dev in /dev/disk/by-id/virtio-ocd-*; do\n" +
+                "  [ -e \"$dev\" ] || continue\n" +
+                "  n=$(echo \"$dev\" | sed 's|.*/virtio-ocd-||')\n" +
+                "  blkid \"$dev\" >/dev/null 2>&1 || mkfs.ext4 -q \"$dev\"\n" +
+                "  mkdir -p \"/mnt/$n\"\n" +
+                "  mountpoint -q \"/mnt/$n\" || mount \"$dev\" \"/mnt/$n\"\n" +
+                "done\n")) + "\n" +
+              "- path: /etc/systemd/system/openchoreo-bootstrap.service\n  permissions: '0644'\n  encoding: b64\n  content: " +
+              base64.encode(bytes(
+                "[Unit]\nDescription=OpenChoreo VM bootstrap\nBefore=openchoreo-app.service\n\n" +
+                "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/sbin/openchoreo-bootstrap\n\n" +
+                "[Install]\nWantedBy=multi-user.target\n")) + "\n" +
+              ((parameters.startCommand != "" || has(workload.container.command))
+                ? "- path: /etc/systemd/system/openchoreo-app.service\n  permissions: '0644'\n  encoding: b64\n  content: " +
+                  base64.encode(bytes(
+                    "[Unit]\nDescription=OpenChoreo component " + metadata.componentName + "\n" +
+                    "Requires=openchoreo-bootstrap.service\nAfter=openchoreo-bootstrap.service network-online.target\nWants=network-online.target\n\n" +
+                    "[Service]\nEnvironmentFile=-/etc/openchoreo/app.env\nEnvironmentFile=-/etc/openchoreo/secret.env\n" +
+                    "WorkingDirectory=/opt/app\nExecStart=" +
+                    (parameters.startCommand != ""
+                      ? parameters.startCommand
+                      : (workload.container.command + (has(workload.container.args) ? workload.container.args : [])).join(" ")) +
+                    "\nRestart=always\nRestartSec=2\n" +
+                    // App stdout/stderr also go to the serial console -> guest-console-log container
+                    // -> fluent-bit -> OpenChoreo logs. Journal keeps a local copy.
+                    "StandardOutput=journal+console\nStandardError=journal+console\n\n[Install]\nWantedBy=multi-user.target\n")) + "\n"
+                : "") +
+              "runcmd:\n" +
+              "- [systemctl, daemon-reload]\n" +
+              "- [systemctl, enable, --now, openchoreo-bootstrap.service]\n" +
+              ((parameters.startCommand != "" || has(workload.container.command))
+                ? "- [systemctl, enable, --now, openchoreo-app.service]\n"
+                : "")
+            ))}
+
+    # ---------------------------------------------------------------- secrets via ESO
+    - id: secrets-external
+      targetPlane: dataplane
+      includeWhen: ${size(configurations.secrets.envs) + size(configurations.secrets.files) > 0}
+      template:
+        apiVersion: external-secrets.io/v1
+        kind: ExternalSecret
+        metadata:
+          name: ${metadata.name}-secrets
+          namespace: ${metadata.namespace}
+        spec:
+          refreshInterval: 15s
+          secretStoreRef:
+            kind: ClusterSecretStore
+            name: ${dataplane.secretStore}
+          target:
+            name: ${metadata.name}-secrets
+            creationPolicy: Owner
+          data: |
+            ${configurations.secrets.envs.map(s, {
+                "secretKey": s.name,
+                "remoteRef": {"key": s.remoteRef.key, ?"property": s.remoteRef.?property}
+              }) +
+              configurations.secrets.files.map(f, {
+                "secretKey": f.name,
+                "remoteRef": {"key": f.remoteRef.key, ?"property": f.remoteRef.?property}
+              })}
+
+    # ---------------------------------------------------------------- networking (same as 'service')
+    - id: service
+      targetPlane: dataplane
+      includeWhen: ${size(workload.endpoints) > 0}
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${metadata.componentName}
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        spec:
+          type: ClusterIP
+          selector: ${metadata.podSelectors}
+          ports: ${workload.toServicePorts()}
+
+    - id: httproute-external
+      targetPlane: dataplane
+      forEach: ${workload.endpoints.transformMap(name, ep, "external" in ep.visibility && ep.type in ["HTTP", "GraphQL", "Websocket"], ep)}
+      var: endpoint
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: ${oc_generate_name(metadata.componentName, endpoint.key)}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-name": endpoint.key, "openchoreo.dev/endpoint-visibility": "external"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.external.name}
+              namespace: ${gateway.ingress.external.namespace}
+          hostnames: |
+            ${[gateway.ingress.external.?http, gateway.ingress.external.?https]
+              .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+              .map(h, metadata.environmentName + "-" + metadata.componentNamespace + "." + h)}
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: /${metadata.componentName}-${endpoint.key}
+              filters:
+                - type: URLRewrite
+                  urlRewrite:
+                    path:
+                      type: ReplacePrefixMatch
+                      replacePrefixMatch: ${endpoint.value.?basePath.orValue("/")}
+              backendRefs:
+                - name: ${metadata.componentName}
+                  port: ${endpoint.value.port}
+
+    - id: httproute-internal
+      targetPlane: dataplane
+      forEach: ${workload.endpoints.transformMap(name, ep, "internal" in ep.visibility && ep.type in ["HTTP", "GraphQL", "Websocket"], ep)}
+      var: endpoint
+      template:
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: ${oc_generate_name(metadata.componentName, endpoint.key, "internal")}
+          namespace: ${metadata.namespace}
+          labels: '${oc_merge(metadata.labels, {"openchoreo.dev/endpoint-name": endpoint.key, "openchoreo.dev/endpoint-visibility": "internal"})}'
+        spec:
+          parentRefs:
+            - name: ${gateway.ingress.internal.name}
+              namespace: ${gateway.ingress.internal.namespace}
+          hostnames: |
+            ${[gateway.ingress.internal.?http, gateway.ingress.internal.?https]
+              .filter(g, g.hasValue()).map(g, g.value().host).distinct()
+              .map(h, metadata.environmentName + "-" + metadata.componentNamespace + "." + h)}
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: /${metadata.componentName}-${endpoint.key}
+              filters:
+                - type: URLRewrite
+                  urlRewrite:
+                    path:
+                      type: ReplacePrefixMatch
+                      replacePrefixMatch: ${endpoint.value.?basePath.orValue("/")}
+              backendRefs:
+                - name: ${metadata.componentName}
+                  port: ${endpoint.value.port}

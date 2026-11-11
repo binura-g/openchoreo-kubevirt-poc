@@ -1,0 +1,49 @@
+# Patch-only trait: adds a KubeVirt VMI readinessProbe. KubeVirt copies it onto the
+# virt-launcher pod, so an unready guest is removed from the Service endpoints.
+# The probe port must be one of the component's endpoint ports (masquerade only forwards those).
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterTrait
+metadata:
+  name: vm-readiness-probe
+  annotations:
+    openchoreo.dev/description: HTTP readiness probe for VM-based components
+spec:
+  parameters:
+    openAPIV3Schema:
+      type: object
+      properties:
+        path:
+          type: string
+          default: /
+        port:
+          type: integer
+          description: Guest port to probe (must be an endpoint port).
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        initialDelaySeconds:
+          type: integer
+          default: 30
+        periodSeconds:
+          type: integer
+          default: 10
+        failureThreshold:
+          type: integer
+          default: 3
+  patches:
+    - target:
+        group: pool.kubevirt.io
+        version: v1beta1
+        kind: VirtualMachinePool
+      targetPlane: dataplane
+      operations:
+        - op: add
+          path: /spec/virtualMachineTemplate/spec/template/spec/readinessProbe
+          value:
+            httpGet:
+              path: ${parameters.path}
+              port: ${parameters.port}
+            initialDelaySeconds: ${environmentConfigs.initialDelaySeconds}
+            periodSeconds: ${environmentConfigs.periodSeconds}
+            failureThreshold: ${environmentConfigs.failureThreshold}

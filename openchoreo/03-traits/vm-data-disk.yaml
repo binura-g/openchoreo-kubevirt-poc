@@ -1,0 +1,67 @@
+# creates + patches trait: provisions a PVC and attaches it to the VM as a virtio disk with
+# serial "ocd-<instanceName>". The vm-service bootstrap formats it on first use (ext4) and
+# mounts it at /mnt/<instanceName>. Filesystem-mode PVC -> KubeVirt creates disk.img inside it.
+#
+# PoC limitation: one PVC per component, so only valid with replicas: 1 (RWO).
+# Per-replica disks need VirtualMachinePool dataVolumeTemplates (CDI), not supported on arm64.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterTrait
+metadata:
+  name: vm-data-disk
+  annotations:
+    openchoreo.dev/description: Persistent data disk for VM-based components (mounted at /mnt/<instanceName>)
+spec:
+  parameters:
+    openAPIV3Schema:
+      type: object
+      properties: {}
+  environmentConfigs:
+    openAPIV3Schema:
+      type: object
+      properties:
+        size:
+          type: string
+          default: 1Gi
+        storageClass:
+          type: string
+          default: ""
+  validations:
+    - message: instanceName must be at most 16 characters (virtio disk serial limit is 20 incl. 'ocd-' prefix).
+      rule: ${size(trait.instanceName) <= 16}
+  creates:
+    - targetPlane: dataplane
+      template:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${metadata.name}-${trait.instanceName}
+          namespace: ${metadata.namespace}
+          labels: ${metadata.labels}
+        spec:
+          accessModes: [ReadWriteOnce]
+          volumeMode: Filesystem
+          storageClassName: |
+            ${environmentConfigs.storageClass != "" ? environmentConfigs.storageClass : oc_omit()}
+          resources:
+            requests:
+              storage: ${environmentConfigs.size}
+  patches:
+    - target:
+        group: pool.kubevirt.io
+        version: v1beta1
+        kind: VirtualMachinePool
+      targetPlane: dataplane
+      operations:
+        - op: add
+          path: /spec/virtualMachineTemplate/spec/template/spec/domain/devices/disks/-
+          value:
+            name: data-${trait.instanceName}
+            serial: ocd-${trait.instanceName}
+            disk:
+              bus: virtio
+        - op: add
+          path: /spec/virtualMachineTemplate/spec/template/spec/volumes/-
+          value:
+            name: data-${trait.instanceName}
+            persistentVolumeClaim:
+              claimName: ${metadata.name}-${trait.instanceName}

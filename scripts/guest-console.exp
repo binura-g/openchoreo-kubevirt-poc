@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# Run shell commands inside a vm-service guest over its serial console (no virtctl needed).
+# Logs in as 'ubuntu' with the binding's debugPassword (PoC only), runs each line of CMDFILE, logs out.
+#
+# Usage: expect scripts/guest-console.exp <dp-namespace> <virt-launcher-pod> <cmdfile> [password]
+# Example:
+#   NS=$(kubectl get ns -o name | grep dp-default-vm-poc-development | cut -d/ -f2)
+#   POD=$(kubectl -n $NS get pod -l kubevirt.io=virt-launcher,openchoreo.dev/component=greeter-vm -o jsonpath='{.items[0].metadata.name}')
+#   printf 'sudo cat /etc/openchoreo/app.env\nfindmnt -n /mnt/data\n' > /tmp/cmds.txt
+#   expect scripts/guest-console.exp $NS $POD /tmp/cmds.txt
+set timeout 25
+set ns [lindex $argv 0]; set pod [lindex $argv 1]; set cmdfile [lindex $argv 2]
+set pw [expr {[llength $argv] > 3 ? [lindex $argv 3] : "openchoreo"}]
+set f [open $cmdfile]; set cmds [read $f]; close $f
+spawn kubectl -n $ns exec -i $pod -c compute -- sh -c "nc -U /var/run/kubevirt-private/*/virt-serial0"
+send "\r"
+expect {
+  "login:" { send "ubuntu\r"; exp_continue }
+  "Password:" { send "$pw\r"; exp_continue }
+  -re {\$ $} {}
+}
+sleep 1; send "export TERM=dumb PS1=GUEST\\$\\ \r"; sleep 1
+expect "GUEST$ "
+foreach line [split [string trim $cmds] "\n"] { send "$line\r"; expect "GUEST$ " }
+send "exit\r"; expect "login:"

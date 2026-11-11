@@ -1,0 +1,20 @@
+# Runs the dependency-test VM in development (1 replica, 512Mi) so the VM -> VM call can be tested:
+# from the client guest, `curl "$GREETER_URL/greeter/greet?name=client-vm"`.
+# debugPassword: PoC only, allows serial-console login as 'ubuntu'. Set replicas: 0 to free memory.
+# Applied as a merge patch to the autoDeploy-created binding:
+#   kubectl -n default patch releasebinding greeter-client-vm-development --type merge \
+#     -p '{"spec":{"componentTypeEnvironmentConfigs":{"replicas":1,"memory":"512Mi","debugPassword":"openchoreo"}}}'
+apiVersion: openchoreo.dev/v1alpha1
+kind: ReleaseBinding
+metadata:
+  name: greeter-client-vm-development
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+    componentName: greeter-client-vm
+  environment: development
+  componentTypeEnvironmentConfigs:
+    replicas: 1
+    memory: 512Mi
+    debugPassword: openchoreo

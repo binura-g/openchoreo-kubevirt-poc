@@ -1,0 +1,42 @@
+# VM-backed component built from source (openchoreo/sample-workloads service-go-greeter).
+# The build packages /app of the Dockerfile image (the go-greeter binary) as the VM app disk;
+# systemd in the guest runs /opt/app/go-greeter.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Component
+metadata:
+  name: greeter-vm
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+  componentType:
+    kind: ClusterComponentType
+    name: proxy/vm-service
+  autoDeploy: true
+  parameters:
+    baseImage: quay.io/containerdisks/ubuntu:24.04
+    startCommand: /opt/app/go-greeter
+  traits:
+    - kind: ClusterTrait
+      name: vm-readiness-probe
+      instanceName: ready
+      parameters:
+        path: /readyz
+        port: 9090
+    - kind: ClusterTrait
+      name: vm-data-disk
+      instanceName: data
+  workflow:
+    kind: ClusterWorkflow
+    name: vm-appdisk-builder
+    parameters:
+      repository:
+        url: https://github.com/openchoreo/sample-workloads
+        revision:
+          branch: main
+        appPath: service-go-greeter
+      docker:
+        context: service-go-greeter
+        filePath: service-go-greeter/Dockerfile
+      vm:
+        appDir: /app

@@ -1,0 +1,77 @@
+# Converts the OCI image produced by `containerfile-build` (/mnt/vol/app-image.tar) into a
+# KubeVirt containerDisk holding an ext4 "app disk" with the contents of APP_DIR from that image.
+# The result overwrites /mnt/vol/app-image.tar under the same tag, so the stock `publish-image`
+# and `generate-workload` steps are reused unchanged. No virtualization is needed at build time.
+#
+# The guest mounts this disk read-only at /opt/app (virtio serial "ocapp"); see vm-service.
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterWorkflowTemplate
+metadata:
+  name: vm-appdisk-build
+spec:
+  templates:
+    - name: build-appdisk
+      inputs:
+        parameters:
+          - name: git-revision
+          - name: app-dir
+            value: /app
+      podSpecPatch: '{"hostUsers": false}'
+      volumes:
+        - name: storage
+          emptyDir:
+            sizeLimit: 10Gi
+      container:
+        image: cr.openchoreo.dev/openchoreo/podman-runner:v1.2
+        securityContext:
+          privileged: true
+        command: [sh, -c]
+        env:
+          - name: IMAGE_NAME
+            value: '{{workflow.parameters.image-name}}'
+          - name: IMAGE_TAG
+            value: '{{workflow.parameters.image-tag}}'
+          - name: GIT_REVISION
+            value: '{{inputs.parameters.git-revision}}'
+          - name: APP_DIR
+            value: '{{inputs.parameters.app-dir}}'
+        volumeMounts:
+          - mountPath: /mnt/vol
+            name: workspace
+          - mountPath: /storage
+            name: storage
+        args:
+          - |-
+            set -eu
+            IMAGE="${IMAGE_NAME}:${IMAGE_TAG}-${GIT_REVISION}"
+            echo ">> App image: $IMAGE  (packaging $APP_DIR)"
+
+            mkdir -p /storage/run /storage/graph
+            cat > /etc/containers/storage.conf <<EOF
+            [storage]
+            driver = "overlay"
+            runroot = "/storage/run"
+            graphroot = "/storage/graph"
+            [storage.options.overlay]
+            EOF
+
+            # PoC: e2fsprogs is not in podman-runner; bake it into the runner image for real use.
+            apk add --no-cache e2fsprogs >/dev/null
+
+            podman load -i /mnt/vol/app-image.tar
+            cid=$(podman create "$IMAGE")
+            mkdir -p /tmp/appfs /tmp/disk
+            podman cp "$cid:$APP_DIR/." /tmp/appfs/
+            podman rm "$cid" >/dev/null
+            echo ">> App files:"; ls -la /tmp/appfs
+
+            size_mb=$(( $(du -sm /tmp/appfs | cut -f1) + 64 ))
+            mkfs.ext4 -q -L ocapp -d /tmp/appfs /tmp/disk/app.img "${size_mb}M"
+            echo ">> Built ext4 app disk (${size_mb}M)"
+
+            printf 'FROM scratch\nADD --chown=107:107 app.img /disk/app.img\n' > /tmp/disk/Containerfile
+            podman rmi "$IMAGE" >/dev/null
+            podman build -t "$IMAGE" -f /tmp/disk/Containerfile /tmp/disk
+            rm -f /mnt/vol/app-image.tar
+            podman save -o /mnt/vol/app-image.tar "$IMAGE"
+            echo ">> containerDisk image saved as $IMAGE"

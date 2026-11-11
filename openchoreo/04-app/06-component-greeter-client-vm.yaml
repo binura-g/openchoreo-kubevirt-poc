@@ -1,0 +1,38 @@
+# Dependency test: a second VM component (no build; reuses greeter-vm's app disk) that consumes
+# greeter-vm's endpoint. The resolved connection URL must land in /etc/openchoreo/app.env.
+# replicas: 0 in development keeps memory free while still exercising rendering.
+apiVersion: openchoreo.dev/v1alpha1
+kind: Component
+metadata:
+  name: greeter-client-vm
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+  componentType:
+    kind: ClusterComponentType
+    name: proxy/vm-service
+  autoDeploy: true
+  parameters:
+    startCommand: /opt/app/go-greeter
+---
+apiVersion: openchoreo.dev/v1alpha1
+kind: Workload
+metadata:
+  name: greeter-client-vm-workload
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+    componentName: greeter-client-vm
+  container:
+    image: host.k3d.internal:10082/default-vm-poc-greeter-vm:v1-0b8ae2b1
+  dependencies:
+    endpoints:
+      - component: greeter-vm
+        name: greeter-api
+        visibility: project
+        envBindings:
+          address: GREETER_URL
+          host: GREETER_HOST
+          port: GREETER_PORT

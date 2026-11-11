@@ -1,0 +1,58 @@
+# Development binding for greeter-vm. autoDeploy creates this binding (and sets releaseName)
+# after the first build; apply this afterwards to add env-specific config, secrets and sizing.
+#
+# How each override reaches the guest (vm-service):
+#   env value            -> /etc/openchoreo/app.env           (cloud-init, EnvironmentFile of the app unit)
+#   env secretKeyRef     -> ESO ExternalSecret -> ISO disk -> /etc/openchoreo/secret.env
+#   file value           -> written by cloud-init at <mountPath>/<key>
+#   file secretKeyRef    -> ESO ExternalSecret -> ISO disk -> copied to <mountPath>/<key> (0600)
+apiVersion: openchoreo.dev/v1alpha1
+kind: ReleaseBinding
+metadata:
+  name: greeter-vm-development
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+    componentName: greeter-vm
+  environment: development
+  componentTypeEnvironmentConfigs:
+    replicas: 1
+    cpuCores: 1
+    memory: 1Gi
+    debugPassword: openchoreo   # PoC only: lets `virtctl console` log in as 'ubuntu'
+  traitEnvironmentConfigs:
+    data:
+      size: 1Gi
+    ready:
+      initialDelaySeconds: 20
+  workloadOverrides:
+    container:
+      env:
+        - key: LOG_LEVEL
+          value: debug
+        - key: GREETING_SOURCE
+          value: kubevirt-vm
+        # Traces: guest egress is SNATed to the launcher pod IP, so the collector's k8sattributes
+        # processor tags spans with the component's pod labels.
+        - key: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://opentelemetry-collector.openchoreo-observability-plane.svc.cluster.local:4318
+        - key: OTEL_SERVICE_NAME
+          value: greeter-vm
+        - key: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: greeter-vm-secrets
+              key: api-key
+      files:
+        - key: app.properties
+          mountPath: /etc/greeter
+          value: |
+            mode=vm
+            env=development
+        - key: tls.crt
+          mountPath: /etc/greeter/tls
+          valueFrom:
+            secretKeyRef:
+              name: greeter-vm-secrets
+              key: tls.crt

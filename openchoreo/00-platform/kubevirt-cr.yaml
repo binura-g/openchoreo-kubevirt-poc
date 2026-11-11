@@ -1,0 +1,19 @@
+# KubeVirt CR for the PoC.
+# Operator is installed first from upstream (not vendored):
+#   kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/v1.9.1/kubevirt-operator.yaml
+#
+# Requires /dev/kvm in the k3d node: start Colima with `colima start --vm-type vz --nested-virtualization`
+# (Apple M3+, macOS 15+). TCG emulation (useEmulation: true) does not work for arm64-on-arm64.
+apiVersion: kubevirt.io/v1
+kind: KubeVirt
+metadata:
+  name: kubevirt
+  namespace: kubevirt
+spec:
+  certificateRotateStrategy: {}
+  imagePullPolicy: IfNotPresent
+  workloadUpdateStrategy: {}
+  configuration:
+    developerConfiguration:
+      useEmulation: false
+      featureGates: []

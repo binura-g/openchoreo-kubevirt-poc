@@ -1,0 +1,14 @@
+# Promotion: bind the same vm-poc ProjectRelease to staging (creates dp-default-vm-poc-staging-*).
+apiVersion: openchoreo.dev/v1alpha1
+kind: ProjectReleaseBinding
+metadata:
+  name: vm-poc-staging
+  namespace: default
+  labels:
+    openchoreo.dev/environment: staging
+    openchoreo.dev/project: vm-poc
+spec:
+  environment: staging
+  owner:
+    projectName: vm-poc
+  projectRelease: vm-poc-6d675ddbf6

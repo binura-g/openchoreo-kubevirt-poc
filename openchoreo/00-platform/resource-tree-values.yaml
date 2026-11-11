@@ -1,0 +1,55 @@
+# openchoreo-control-plane Helm values: release resource-tree traversal rules for KubeVirt kinds.
+# Ref: https://openchoreo.dev/docs/platform-engineer-guide/resource-tree-rules/
+#
+# These are appended to the chart's built-in rules (Deployment, CronJob, Job, ExternalSecret).
+# KubeVirt sets controller ownerReferences on every hop, so the exact ownerRef matcher is used:
+#   VirtualMachinePool -> VirtualMachine -> VirtualMachineInstance -> Pod (virt-launcher)
+# The cluster agent already has get/list on these kinds via cluster-agent-kubevirt-rbac.yaml.
+#
+# Apply (values-only change, keeps the installed chart):
+#   helm upgrade openchoreo-control-plane <installed chart> -n openchoreo-control-plane \
+#     --reuse-values -f openchoreo/00-platform/resource-tree-values.yaml
+openchoreoApi:
+  config:
+    resourceTree:
+      rules:
+        # Primary resource of the vm-service ComponentType.
+        - root:
+            group: pool.kubevirt.io
+            version: v1beta1
+            kind: VirtualMachinePool
+            resource: virtualmachinepools
+          children:
+            - kind:
+                group: kubevirt.io
+                version: v1
+                kind: VirtualMachine
+                resource: virtualmachines
+              children:
+                - kind:
+                    group: kubevirt.io
+                    version: v1
+                    kind: VirtualMachineInstance
+                    resource: virtualmachineinstances
+                  children:
+                    - kind:
+                        version: v1
+                        kind: Pod
+                        resource: pods
+        # For ComponentTypes that render a bare VirtualMachine as the primary resource.
+        - root:
+            group: kubevirt.io
+            version: v1
+            kind: VirtualMachine
+            resource: virtualmachines
+          children:
+            - kind:
+                group: kubevirt.io
+                version: v1
+                kind: VirtualMachineInstance
+                resource: virtualmachineinstances
+              children:
+                - kind:
+                    version: v1
+                    kind: Pod
+                    resource: pods

@@ -1,0 +1,54 @@
+# Promotion of greeter-vm development -> staging: same immutable ComponentRelease (same app disk
+# image), staging-specific sizing and config. releaseName = the development binding's releaseName:
+#   kubectl -n default get releasebinding greeter-vm-development -o jsonpath='{.spec.releaseName}'
+# replicas: 1 because the vm-data-disk trait creates ONE PVC that every replica attaches; with 2
+# replicas QEMU's image lock refuses the second VM ("Failed to get \"write\" lock"). Per-replica disks
+# need pool dataVolumeTemplates (CDI). See PROPOSAL.md, "Rollouts and persistent data".
+apiVersion: openchoreo.dev/v1alpha1
+kind: ReleaseBinding
+metadata:
+  name: greeter-vm-staging
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+    componentName: greeter-vm
+  environment: staging
+  releaseName: greeter-vm-6bd567b6bc
+  componentTypeEnvironmentConfigs:
+    replicas: 1
+    cpuCores: 1
+    memory: 1Gi
+  traitEnvironmentConfigs:
+    data:
+      size: 1Gi
+    ready:
+      initialDelaySeconds: 20
+  workloadOverrides:
+    container:
+      env:
+        - key: LOG_LEVEL
+          value: info
+        - key: GREETING_SOURCE
+          value: kubevirt-vm-staging
+        - key: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://opentelemetry-collector.openchoreo-observability-plane.svc.cluster.local:4318
+        - key: OTEL_SERVICE_NAME
+          value: greeter-vm
+        - key: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: greeter-vm-secrets
+              key: api-key
+      files:
+        - key: app.properties
+          mountPath: /etc/greeter
+          value: |
+            mode=vm
+            env=staging
+        - key: tls.crt
+          mountPath: /etc/greeter/tls
+          valueFrom:
+            secretKeyRef:
+              name: greeter-vm-secrets
+              key: tls.crt

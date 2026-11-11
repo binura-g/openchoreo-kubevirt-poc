@@ -1,0 +1,280 @@
+# ClusterWorkflow for vm-service components. Derived from the stock dockerfile-builder:
+#   checkout-source -> build-image -> build-appdisk (new) -> publish-image -> generate-workload-cr
+# The generated Workload carries the containerDisk image in spec.container.image.
+apiVersion: openchoreo.dev/v1alpha1
+kind: ClusterWorkflow
+metadata:
+  name: vm-appdisk-builder
+  labels:
+    openchoreo.dev/workflow-type: component
+  annotations:
+    openchoreo.dev/description: Build a Dockerfile, then package APP_DIR of the image as a KubeVirt containerDisk (app disk) for vm-service components
+spec:
+  externalRefs:
+    - apiVersion: openchoreo.dev/v1alpha1
+      id: git-secret-reference
+      kind: SecretReference
+      name: ${parameters.repository.secretRef}
+  parameters:
+    openAPIV3Schema:
+      properties:
+        buildArgs:
+          default: []
+          description: 'Docker build arguments declared with ARG in the Dockerfile (passed as --build-arg). Reference: https://docs.podman.io/en/stable/markdown/podman-build.1.html#build-arg-arg-value'
+          items:
+            properties:
+              name:
+                description: Build argument name
+                type: string
+              value:
+                description: Build argument value
+                type: string
+            required:
+              - name
+              - value
+            type: object
+          type: array
+        buildEnv:
+          default: []
+          description: 'Environment variables available during the build (passed as --env to podman build). Reference: https://docs.podman.io/en/stable/markdown/podman-build.1.html#env-env-value'
+          items:
+            properties:
+              name:
+                description: Environment variable name
+                type: string
+              value:
+                description: Environment variable value
+                type: string
+            required:
+              - name
+              - value
+            type: object
+          type: array
+        docker:
+          default: {}
+          description: Docker build configuration
+          properties:
+            context:
+              default: .
+              description: Docker build context path relative to the repository root
+              type: string
+            filePath:
+              default: ./Dockerfile
+              description: Path to the Dockerfile relative to the repository root
+              type: string
+          type: object
+        repository:
+          description: Git repository configuration
+          properties:
+            appPath:
+              default: .
+              description: Path to the application directory within the repository
+              type: string
+              x-openchoreo-component-parameter-repository-app-path: true
+            revision:
+              default: {}
+              properties:
+                branch:
+                  default: main
+                  description: Git branch to checkout
+                  type: string
+                  x-openchoreo-component-parameter-repository-branch: true
+                commit:
+                  default: ""
+                  description: Git commit SHA or reference (optional, defaults to latest)
+                  type: string
+                  x-openchoreo-component-parameter-repository-commit: true
+              type: object
+            secretRef:
+              default: ""
+              description: Secret reference name for Git credentials
+              type: string
+              x-openchoreo-component-parameter-repository-secret-ref: true
+            url:
+              description: Git repository URL
+              type: string
+              x-openchoreo-component-parameter-repository-url: true
+          required:
+            - url
+          type: object
+        vm:
+          type: object
+          default: {}
+          description: VM app-disk packaging
+          properties:
+            appDir:
+              type: string
+              default: /app
+              description: Directory inside the built image to package as the VM app disk
+      required:
+        - repository
+      type: object
+  resources:
+    - id: git-secret
+      includeWhen: ${has(parameters.repository.secretRef) && parameters.repository.secretRef != ""}
+      template:
+        apiVersion: external-secrets.io/v1
+        kind: ExternalSecret
+        metadata:
+          name: ${metadata.workflowRunName}-git-secret
+          namespace: ${metadata.namespace}
+        spec:
+          data: |
+            ${externalRefs['git-secret-reference'].spec.data.map(secret, {
+              "secretKey": secret.secretKey,
+              "remoteRef": {
+                "key": secret.remoteRef.key,
+                "property": has(secret.remoteRef.property) && secret.remoteRef.property != "" ? secret.remoteRef.property : oc_omit()
+              }
+            })}
+          refreshInterval: 15s
+          secretStoreRef:
+            kind: ClusterSecretStore
+            name: ${workflowplane.secretStore}
+          target:
+            creationPolicy: Owner
+            name: ${metadata.workflowRunName}-git-secret
+            template:
+              type: ${externalRefs['git-secret-reference'].spec.template.type}
+    - id: registry-push-secret
+      template:
+        apiVersion: external-secrets.io/v1
+        kind: ExternalSecret
+        metadata:
+          name: ${metadata.workflowRunName}-registry-push-secret
+          namespace: ${metadata.namespace}
+        spec:
+          data:
+            - remoteRef:
+                key: registry-push-secret
+                property: value
+              secretKey: registrysecret
+          refreshInterval: 15s
+          secretStoreRef:
+            kind: ClusterSecretStore
+            name: ${workflowplane.secretStore}
+          target:
+            creationPolicy: Owner
+            name: ${metadata.workflowRunName}-registry-push-secret
+            template:
+              data:
+                .dockerconfigjson: '{{ .registrysecret | toString }}'
+              type: kubernetes.io/dockerconfigjson
+  runTemplate:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Workflow
+    metadata:
+      name: ${metadata.workflowRunName}
+      namespace: ${metadata.namespace}
+    spec:
+      arguments:
+        parameters:
+          - name: component-name
+            value: ${metadata.labels['openchoreo.dev/component']}
+          - name: project-name
+            value: ${metadata.labels['openchoreo.dev/project']}
+          - name: workflowrun-name
+            value: ${metadata.workflowRunName}
+          - name: namespace-name
+            value: ${metadata.namespaceName}
+          - name: git-repo
+            value: ${parameters.repository.url}
+          - name: branch
+            value: ${parameters.repository.revision.branch}
+          - name: commit
+            value: ${parameters.repository.revision.commit}
+          - name: app-path
+            value: ${parameters.repository.appPath}
+          - name: docker-context
+            value: ${parameters.docker.context}
+          - name: dockerfile-path
+            value: ${parameters.docker.filePath}
+          - name: build-env
+            value: ${parameters.buildEnv}
+          - name: build-args
+            value: ${parameters.buildArgs}
+          - name: image-name
+            value: ${metadata.namespaceName}-${metadata.labels['openchoreo.dev/project']}-${metadata.labels['openchoreo.dev/component']}
+          - name: image-tag
+            value: v1
+          - name: git-secret
+            value: ${metadata.workflowRunName}-git-secret
+          - name: registry-push-secret
+            value: ${metadata.workflowRunName}-registry-push-secret
+          - name: app-dir
+            value: ${parameters.vm.appDir}
+      entrypoint: build-workflow
+      serviceAccountName: workflow-sa
+      templates:
+        - name: build-workflow
+          steps:
+            - - name: checkout-source
+                templateRef:
+                  clusterScope: true
+                  name: checkout-source
+                  template: checkout
+            - - arguments:
+                  parameters:
+                    - name: git-revision
+                      value: '{{steps.checkout-source.outputs.parameters.git-revision}}'
+                    - name: build-env
+                      value: '{{workflow.parameters.build-env}}'
+                    - name: build-args
+                      value: '{{workflow.parameters.build-args}}'
+                name: build-image
+                templateRef:
+                  clusterScope: true
+                  name: containerfile-build
+                  template: build-image
+            - - name: build-appdisk
+                templateRef:
+                  clusterScope: true
+                  name: vm-appdisk-build
+                  template: build-appdisk
+                arguments:
+                  parameters:
+                    - name: git-revision
+                      value: '{{steps.checkout-source.outputs.parameters.git-revision}}'
+                    - name: app-dir
+                      value: '{{workflow.parameters.app-dir}}'
+            - - arguments:
+                  parameters:
+                    - name: git-revision
+                      value: '{{steps.checkout-source.outputs.parameters.git-revision}}'
+                name: publish-image
+                templateRef:
+                  clusterScope: true
+                  name: publish-image
+                  template: publish-image
+            - - arguments:
+                  parameters:
+                    - name: image
+                      value: '{{steps.publish-image.outputs.parameters.image}}'
+                    - name: run-name
+                      value: '{{workflow.parameters.workflowrun-name}}'
+                    - name: source-commit
+                      value: '{{steps.checkout-source.outputs.parameters.commit-sha}}'
+                    - name: source-branch
+                      value: '{{steps.checkout-source.outputs.parameters.source-branch}}'
+                    - name: source-repository
+                      value: '{{workflow.parameters.git-repo}}'
+                    - name: source-authored-at
+                      value: '{{steps.checkout-source.outputs.parameters.commit-authored-at}}'
+                name: generate-workload-cr
+                templateRef:
+                  clusterScope: true
+                  name: generate-workload
+                  template: generate-workload-cr
+      volumeClaimTemplates:
+        - metadata:
+            name: workspace
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 2Gi
+  ttlAfterCompletion: 1d
+  workflowPlaneRef:
+    kind: ClusterWorkflowPlane
+    name: default

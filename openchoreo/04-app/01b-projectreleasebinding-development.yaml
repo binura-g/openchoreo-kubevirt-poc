@@ -1,0 +1,16 @@
+# Binds the vm-poc ProjectRelease to development; this creates the data-plane namespace
+# (dp-default-vm-poc-development-*). Not auto-created when a Project is applied via kubectl.
+# projectRelease name is generated: kubectl -n default get project vm-poc -o jsonpath='{.status.latestRelease.name}'
+apiVersion: openchoreo.dev/v1alpha1
+kind: ProjectReleaseBinding
+metadata:
+  name: vm-poc-development
+  namespace: default
+  labels:
+    openchoreo.dev/environment: development
+    openchoreo.dev/project: vm-poc
+spec:
+  environment: development
+  owner:
+    projectName: vm-poc
+  projectRelease: vm-poc-6d675ddbf6

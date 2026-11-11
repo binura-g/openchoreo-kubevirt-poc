@@ -1,0 +1,43 @@
+# Zero-downtime rollout test (separate from the 04-app sample).
+# Stateless VM component: readiness probe, NO vm-data-disk (a shared PVC blocks replicas > 1), no secrets.
+# Reuses greeter-vm's built app disk, so no build is needed. Set the image to greeter-vm's:
+#   kubectl -n default get workload greeter-vm-workload -o jsonpath='{.spec.container.image}'
+apiVersion: openchoreo.dev/v1alpha1
+kind: Component
+metadata:
+  name: greeter-vm-ha
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+  componentType:
+    kind: ClusterComponentType
+    name: proxy/vm-service
+  autoDeploy: true
+  parameters:
+    startCommand: /opt/app/go-greeter
+  traits:
+    - kind: ClusterTrait
+      name: vm-readiness-probe
+      instanceName: ready
+      parameters:
+        path: /readyz
+        port: 9090
+---
+apiVersion: openchoreo.dev/v1alpha1
+kind: Workload
+metadata:
+  name: greeter-vm-ha-workload
+  namespace: default
+spec:
+  owner:
+    projectName: vm-poc
+    componentName: greeter-vm-ha
+  container:
+    image: host.k3d.internal:10082/default-vm-poc-greeter-vm:v1-0b8ae2b1
+  endpoints:
+    greeter-api:
+      type: HTTP
+      port: 9090
+      visibility:
+        - external

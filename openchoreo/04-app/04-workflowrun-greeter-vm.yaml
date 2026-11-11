@@ -1,0 +1,25 @@
+# One-shot build of greeter-vm (equivalent to "Build" in the UI). Use generateName via
+# `kubectl create -f` so it can be re-run.
+apiVersion: openchoreo.dev/v1alpha1
+kind: WorkflowRun
+metadata:
+  generateName: greeter-vm-build-
+  namespace: default
+  labels:
+    openchoreo.dev/project: vm-poc
+    openchoreo.dev/component: greeter-vm
+spec:
+  workflow:
+    kind: ClusterWorkflow
+    name: vm-appdisk-builder
+    parameters:
+      repository:
+        url: https://github.com/openchoreo/sample-workloads
+        revision:
+          branch: main
+        appPath: service-go-greeter
+      docker:
+        context: service-go-greeter
+        filePath: service-go-greeter/Dockerfile
+      vm:
+        appDir: /app
